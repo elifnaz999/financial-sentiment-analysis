@@ -1,6 +1,7 @@
 # Environment & secrets
 .env
 *.env
+.streamlit/secrets.toml
 
 # Data (large files)
 data/raw/*.csv

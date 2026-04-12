@@ -24,6 +24,15 @@ from dotenv import load_dotenv
 load_dotenv()
 AV_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY", "")
 
+# On Streamlit Cloud, secrets are managed via st.secrets (not .env).
+# We try to read from there without requiring streamlit as a hard import.
+if not AV_API_KEY:
+    try:
+        import streamlit as st
+        AV_API_KEY = st.secrets.get("ALPHA_VANTAGE_API_KEY", "")
+    except Exception:
+        pass
+
 # ---------------------------------------------------------------------------
 # Sample headline pool — 240 realistic headlines across major tickers
 # Each entry: (headline, primary_ticker, rough_sentiment  1=pos 0=neu -1=neg)

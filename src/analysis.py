@@ -83,7 +83,7 @@ def merge_sentiment_prices(
     p["Date"] = pd.to_datetime(p["Date"]).dt.normalize()
 
     merged = pd.merge(p, s, on="Date", how="left")
-    merged["mean_score"] = merged["mean_score"].fillna(method="ffill")
+    merged["mean_score"] = merged["mean_score"].ffill()
     return merged.dropna(subset=["mean_score", "return_1d"])
 
 
