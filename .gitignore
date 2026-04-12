@@ -1,0 +1,41 @@
+# Environment & secrets
+.env
+*.env
+
+# Data (large files)
+data/raw/*.csv
+data/raw/*.json
+data/processed/*.csv
+data/processed/*.parquet
+
+# Outputs
+outputs/charts/*.png
+outputs/charts/*.pdf
+outputs/tables/*.csv
+
+# HuggingFace model cache
+.cache/
+transformers_cache/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
