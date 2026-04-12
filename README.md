@@ -7,7 +7,7 @@ news headlines using the **FinBERT** transformer model, visualizes sentiment tre
 and investigates the correlation between news sentiment and stock price movements —
 all served through an interactive **Streamlit dashboard**.
 
-**🚀 Live demo:** *(paste your Streamlit Community Cloud URL here after deploying)*
+🚀 Live Demo: [Try the App Here](https://financial-sentiment-analysis-dkzxfbszakm8xn5hdmio4x.streamlit.app)
 
 ---
 
