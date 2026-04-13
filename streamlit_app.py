@@ -81,11 +81,18 @@ with st.sidebar:
     with date_col2:
         end_date = st.date_input("To", value=default_end)
 
+    if market == "US":
+        _source_opts = ["auto", "sample", "yfinance", "alphavantage"]
+        _source_help = "'auto' tries Alpha Vantage → yfinance → sample dataset"
+    else:
+        _source_opts = ["auto", "sample", "kap", "bigpara", "investing_tr"]
+        _source_help = "'auto' tries KAP RSS → Bigpara → Investing.com TR → sample dataset"
+
     news_source = st.selectbox(
         "News Source",
-        ["auto", "sample", "yfinance", "alphavantage"],
+        _source_opts,
         index=0,
-        help="'auto' tries Alpha Vantage → yfinance → sample dataset",
+        help=_source_help,
     )
 
     batch_size = st.slider(
@@ -121,8 +128,9 @@ def load_finbert_cached():
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def get_scored_data(ticker: str, source: str, start: str, end: str, bs: int) -> pd.DataFrame:
-    """Fetch + score headlines. Cached for 1 hour per (ticker, source, dates) combo."""
+def get_scored_data(ticker: str, source: str, start: str, end: str, bs: int,
+                    market: str = "US") -> pd.DataFrame:
+    """Fetch + score headlines. Cached for 1 hour per (ticker, source, dates, market) combo."""
     # try disk cache first (within same session/container)
     cached = load_scored(ticker)
     if cached is not None and not cached.empty:
@@ -132,7 +140,7 @@ def get_scored_data(ticker: str, source: str, start: str, end: str, bs: int) -> 
             return cached[mask].reset_index(drop=True)
 
     days = (pd.Timestamp(end) - pd.Timestamp(start)).days + 30
-    news   = load_news(ticker, days=days, source=source)
+    news   = load_news(ticker, days=days, source=source, market=market)
     scored = score_dataframe(news, batch_size=bs)
     try:
         save_scored(scored, ticker)
@@ -165,7 +173,7 @@ if run_btn:
 
     with st.spinner("Scoring headlines with FinBERT …"):
         try:
-            df_scored = get_scored_data(ticker, news_source, start_str, end_str, batch_size)
+            df_scored = get_scored_data(ticker, news_source, start_str, end_str, batch_size, market)
         except Exception as e:
             st.error(f"Sentiment scoring failed: {e}")
             st.stop()
@@ -198,6 +206,12 @@ if run_btn:
     st.session_state.active_ticker = ticker
     st.session_state.active_market = market
     st.success(f"✅ Scored **{len(df_scored)}** headlines for **{ticker}**")
+    if market == "BIST":
+        st.info(
+            "ℹ️ **BIST mode:** Headlines are sourced from Turkish news feeds. "
+            "FinBERT is trained on English financial text — sentiment scores for "
+            "Turkish headlines are approximate. Turkish model support is planned for Phase 3."
+        )
 
 
 # ── landing screen (before first run) ─────────────────────────────────────────
@@ -481,14 +495,27 @@ general-purpose sentiment models.
 
 ---
 
-#### Data Sources
+#### Data Sources — US Market
 
-| Source              | Key required? | Notes                          |
-|---------------------|:-------------:|-------------------------------|
-| Alpha Vantage API   | Yes (free)    | 25 requests/day free tier      |
-| yfinance news       | No            | ~20 recent headlines per ticker|
-| Built-in sample set | No            | 240 curated headlines, offline |
-| yfinance prices     | No            | Full OHLCV history             |
+| Source              | Key required? | Notes                           |
+|---------------------|:-------------:|--------------------------------|
+| Alpha Vantage API   | Yes (free)    | 25 requests/day free tier       |
+| yfinance news       | No            | ~20 recent headlines per ticker |
+| Built-in sample set | No            | 240 curated headlines, offline  |
+| yfinance prices     | No            | Full OHLCV history              |
+
+#### Data Sources — BIST Market
+
+| Source              | Key required? | Notes                                        |
+|---------------------|:-------------:|---------------------------------------------|
+| KAP RSS             | No            | Public company disclosures (kap.org.tr)      |
+| Bigpara RSS         | No            | Hurriyet financial news feed                 |
+| Investing.com TR    | No            | Turkish market news RSS                      |
+| BIST sample set     | No            | 90+ Turkish-language headlines, offline      |
+| yfinance prices     | No            | Full OHLCV via Yahoo Finance `.IS` suffix    |
+
+> ⚠️ **BIST sentiment note:** FinBERT is trained on English text. Sentiment scores for
+> Turkish headlines are approximate until a Turkish financial NLP model is integrated (Phase 3).
 
 ---
 

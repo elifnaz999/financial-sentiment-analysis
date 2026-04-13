@@ -1,20 +1,28 @@
 """
 News headline fetching module.
 
-Priority order (auto mode):
+US mode priority order (auto):
   1. Alpha Vantage News Sentiment API  – real news, free tier 25 req/day
   2. yfinance ticker.news              – real recent headlines, no key needed
-  3. Built-in sample dataset           – offline fallback, always available
+  3. Built-in US sample dataset        – offline fallback, always available
+
+BIST mode priority order (auto):
+  1. KAP RSS                           – public company disclosures (kap.org.tr)
+  2. Bigpara ekonomi RSS               – Hurriyet financial news feed
+  3. Investing.com Turkey RSS          – Turkish market news
+  4. Built-in BIST sample dataset      – offline fallback, always available
 
 Usage:
     from src.data_loader import load_news
-    df = load_news("AAPL", days=180)
+    df = load_news("AAPL", days=180, market="US")
+    df = load_news("THYAO", days=180, market="BIST")
 """
 
 from __future__ import annotations
 
 import os
 import datetime
+import xml.etree.ElementTree as ET
 import numpy as np
 import pandas as pd
 import requests
@@ -25,7 +33,6 @@ load_dotenv()
 AV_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY", "")
 
 # On Streamlit Cloud, secrets are managed via st.secrets (not .env).
-# We try to read from there without requiring streamlit as a hard import.
 if not AV_API_KEY:
     try:
         import streamlit as st
@@ -33,11 +40,33 @@ if not AV_API_KEY:
     except Exception:
         pass
 
+# ── HTTP headers for RSS requests ────────────────────────────────────────────
+_RSS_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/rss+xml, application/xml, text/xml, */*",
+}
+
+# ── BIST ticker → company keyword mapping ────────────────────────────────────
+# Used to filter RSS feed items that are relevant to the selected ticker.
+_BIST_KEYWORDS: dict[str, list[str]] = {
+    "THYAO": ["thyao", "türk hava", "turk hava", "turkish airlines", "t.hava", "thy"],
+    "ASELS": ["asels", "aselsan"],
+    "GARAN": ["garan", "garanti"],
+    "AKBNK": ["akbnk", "akbank"],
+    "KCHOL": ["kchol", "koç holding", "koc holding", "koç"],
+    "SISE":  ["sise", "şişecam", "sisecam", "şişe cam"],
+    "EREGL": ["eregl", "ereğli", "eregli", "erdemir"],
+    "TUPRS": ["tuprs", "tüpraş", "tupras"],
+    "BIMAS": ["bimas", "bim birleşik", "bim mağaza", "bim "],
+    "ISCTR": ["isctr", "iş bankası", "is bankasi", "işbank", "isbank"],
+}
+
 # ---------------------------------------------------------------------------
-# Sample headline pool — 240 realistic headlines across major tickers
-# Each entry: (headline, primary_ticker, rough_sentiment  1=pos 0=neu -1=neg)
-# Sentiment is only used for generating plausible sample distributions;
-# the actual model re-scores every headline independently.
+# US sample headline pool — 240 realistic headlines across major tickers
 # ---------------------------------------------------------------------------
 _HEADLINES = [
     # ── AAPL ──────────────────────────────────────────────────────────────
@@ -140,18 +169,188 @@ _HEADLINES = [
     ("OPEC+ maintains current oil production levels at monthly Vienna meeting", "SPY", 0),
 ]
 
+# ---------------------------------------------------------------------------
+# BIST sample headline pool — Turkish-language realistic headlines
+# Each entry: (headline, primary_ticker, rough_sentiment  1=pos 0=neu -1=neg)
+# ---------------------------------------------------------------------------
+_BIST_HEADLINES = [
+    # ── THYAO ─────────────────────────────────────────────────────────────
+    ("Türk Hava Yolları üçüncü çeyrekte rekor yolcu sayısına ulaştı", "THYAO", 1),
+    ("THY net kârı yıllık yüzde 38 artışla beklentileri aştı", "THYAO", 1),
+    ("Türk Hava Yolları Avrupa'ya 12 yeni destinasyon ekliyor, talepler güçlü", "THYAO", 1),
+    ("THY filo büyüme planı kapsamında 40 yeni uçak siparişi verdi", "THYAO", 1),
+    ("THY yakıt maliyetlerindeki artış nedeniyle marjlar baskı altına girdi", "THYAO", -1),
+    ("Türk Hava Yolları kargo gelirlerinde belirgin düşüş yaşandığını açıkladı", "THYAO", -1),
+    ("THY döviz kuru volatilitesi nedeniyle kârlılık riski gündemde", "THYAO", -1),
+    ("Türk Hava Yolları yeni Orta Doğu seferlerine başladığını duyurdu", "THYAO", 0),
+    ("THY 2024 yatırım bütçesini ve filo planlarını açıkladı", "THYAO", 0),
+    # ── ASELS ─────────────────────────────────────────────────────────────
+    ("Aselsan savunma ihracatında rekor gelire ulaşarak büyüme sürdürdü", "ASELS", 1),
+    ("Aselsan yurt dışı savunma sözleşmelerinde büyük artış kaydetti", "ASELS", 1),
+    ("Aselsan yeni nesil radar sistemi için önemli ihracat sözleşmesi imzaladı", "ASELS", 1),
+    ("Aselsan güçlü kamu sözleşmeleriyle kârlılığını artırdı", "ASELS", 1),
+    ("Aselsan bazı projelerdeki gecikme nakit akışını olumsuz etkiliyor", "ASELS", -1),
+    ("Aselsan hammadde maliyetlerindeki yükseliş marjları daralttı", "ASELS", -1),
+    ("Aselsan uluslararası iş birliği kapsamını genişletti", "ASELS", 0),
+    ("Aselsan Türk Silahlı Kuvvetleri ile yeni tedarik protokolü imzaladı", "ASELS", 0),
+    # ── GARAN ─────────────────────────────────────────────────────────────
+    ("Garanti BBVA net kârı beklentilerin üzerinde açıklandı", "GARAN", 1),
+    ("Garanti Bankası dijital müşteri tabanı 14 milyonu aştı", "GARAN", 1),
+    ("Garanti BBVA temettü artışı açıkladı, yatırımcılar memnuniyetini dile getirdi", "GARAN", 1),
+    ("Garanti Bankası kredi büyümesi sektör ortalamasının belirgin üzerinde seyretti", "GARAN", 1),
+    ("Garanti BBVA takipteki kredi oranında sınırlı bir yükseliş gözlemlendi", "GARAN", -1),
+    ("Garanti Bankası faiz marjlarının daralmaya devam ettiğini açıkladı", "GARAN", -1),
+    ("Garanti BBVA sürdürülebilir finans alanında yeni hedeflerini paylaştı", "GARAN", 0),
+    ("Garanti Bankası olağan genel kurulu tamamlandı", "GARAN", 0),
+    # ── AKBNK ─────────────────────────────────────────────────────────────
+    ("Akbank güçlü çeyrek kârıyla özkaynak kârlılığını yüksek tuttu", "AKBNK", 1),
+    ("Akbank dijital bankacılık altyapısına yönelik yatırımlarını artırıyor", "AKBNK", 1),
+    ("Akbank yüksek faiz ortamında güçlü net faiz marjını korudu", "AKBNK", 1),
+    ("Akbank kredi kartı işlem hacminde rekor kırdı", "AKBNK", 1),
+    ("Akbank operasyonel maliyetler baskı altında seyrediyor", "AKBNK", -1),
+    ("Akbank döviz kuru riski yönetiminde zorluklarla karşılaşıyor", "AKBNK", -1),
+    ("Akbank yeni dijital şube ağı genişleme stratejisini açıkladı", "AKBNK", 0),
+    ("Akbank kurumsal bankacılık segmentinde büyümeyi sürdürüyor", "AKBNK", 0),
+    # ── KCHOL ─────────────────────────────────────────────────────────────
+    ("Koç Holding konsolide kârı analist tahminlerini aştı", "KCHOL", 1),
+    ("Koç Holding enerji ve otomotiv segmentlerinde güçlü büyüme kaydetti", "KCHOL", 1),
+    ("Koç Holding yenilenebilir enerji yatırımlarını hızlandırıyor", "KCHOL", 1),
+    ("Koç Holding bağlı ortaklıklardan gelen temettü gelirleri arttı", "KCHOL", 1),
+    ("Koç Holding bazı segmentlerde marj daralması yaşandığını açıkladı", "KCHOL", -1),
+    ("Koç Holding yurt dışı makroekonomik risklerden etkilenebileceğini belirtti", "KCHOL", -1),
+    ("Koç Holding yıllık stratejik plan toplantısını tamamladı", "KCHOL", 0),
+    ("Koç Holding yönetim kurulunda görev dağılımı güncellendi", "KCHOL", 0),
+    # ── SISE ──────────────────────────────────────────────────────────────
+    ("Şişecam cam ve kimyasallar segmentinde güçlü büyüme kaydetti", "SISE", 1),
+    ("Şişecam ihracat gelirlerinde yüzde 22 artış elde ettiğini açıkladı", "SISE", 1),
+    ("Şişecam Avrupa'da yeni üretim tesisi açarak kapasiteyi genişletti", "SISE", 1),
+    ("Şişecam enerji maliyetlerindeki yükseliş kârlılığı olumsuz etkiliyor", "SISE", -1),
+    ("Şişecam Avrupa cam talebinde yavaşlama gözlemleniyor", "SISE", -1),
+    ("Şişecam soda külü kapasite artırım yatırımlarına devam ettiğini bildirdi", "SISE", 0),
+    ("Şişecam sürdürülebilirlik ve çevre hedefleri güncellendi", "SISE", 0),
+    # ── EREGL ─────────────────────────────────────────────────────────────
+    ("Ereğli Demir Çelik güçlü yurt içi talep sayesinde satışlarını artırdı", "EREGL", 1),
+    ("Erdemir ihracat fiyatlarındaki iyileşmeyle kârlılığını güçlendirdi", "EREGL", 1),
+    ("Ereğli çelik üretiminde rekor kapasiteye ulaştı", "EREGL", 1),
+    ("Erdemir ithal çelik rekabeti fiyatlar üzerinde baskı oluşturuyor", "EREGL", -1),
+    ("Ereğli enerji ve hammadde maliyetleri marjı sıkıştırmaya devam ediyor", "EREGL", -1),
+    ("Erdemir çevre uyum yatırımları kapsamında önemli harcama yapıldığını açıkladı", "EREGL", -1),
+    ("Ereğli Demir Çelik çelik teslimat programını revize etti", "EREGL", 0),
+    ("Erdemir katma değerli çelik üretim kapasitesini artırıyor", "EREGL", 0),
+    # ── TUPRS ─────────────────────────────────────────────────────────────
+    ("Tüpraş güçlü rafineri marjlarıyla rekor kâr elde ettiğini açıkladı", "TUPRS", 1),
+    ("Tüpraş ham petrol işleme kapasitesini artırarak verimliliği yükseltti", "TUPRS", 1),
+    ("Tüpraş yenilenebilir yakıt alanındaki yatırımlarını duyurdu", "TUPRS", 1),
+    ("Tüpraş ham petrol fiyatlarındaki volatilite marjı olumsuz etkiliyor", "TUPRS", -1),
+    ("Tüpraş planlı bakım duruşu üretimde geçici düşüşe yol açtı", "TUPRS", -1),
+    ("Tüpraş yıllık kapasite kullanım oranı ve operasyonel verileri açıklandı", "TUPRS", 0),
+    ("Tüpraş enerji verimliliği yatırım programını hayata geçirdi", "TUPRS", 0),
+    # ── BIMAS ─────────────────────────────────────────────────────────────
+    ("BİM Birleşik Mağazalar yurt içi satışlarında güçlü büyüme kaydetti", "BIMAS", 1),
+    ("BİM Mağazaları yurt dışı genişlemesini hızlandırdığını açıkladı", "BIMAS", 1),
+    ("BİM net kârı beklentilerin üzerinde geldi, pazar payı artmaya devam ediyor", "BIMAS", 1),
+    ("BİM enflasyonist ortamda lojistik ve pazarlama giderleri baskı oluşturuyor", "BIMAS", -1),
+    ("BİM tedarik zinciri maliyetleri yüksek seyretmeye devam ediyor", "BIMAS", -1),
+    ("BİM Mağazaları yeni mağaza açılış hedefini yıllık plana ekledi", "BIMAS", 0),
+    ("BİM Mağazaları özel markalı ürün yelpazesini genişletiyor", "BIMAS", 0),
+    # ── ISCTR ─────────────────────────────────────────────────────────────
+    ("İş Bankası üçüncü çeyrekte net kârını yüzde 31 artırdı", "ISCTR", 1),
+    ("İş Bankası güçlü mevduat büyümesiyle fonlama maliyetini aşağı çekti", "ISCTR", 1),
+    ("İşbank dijital platformda işlem hacmi rekor seviyeye ulaştı", "ISCTR", 1),
+    ("İş Bankası yüksek enflasyon ortamında marj baskısıyla karşı karşıya kaldı", "ISCTR", -1),
+    ("İş Bankası takipteki kredi karşılık oranını artırdı", "ISCTR", -1),
+    ("İş Bankası yıllık olağan genel kurulu tamamlandı, temettü onaylandı", "ISCTR", 0),
+    ("İş Bankası kurumsal sosyal sorumluluk ve sürdürülebilirlik raporu yayımlandı", "ISCTR", 0),
+    # ── BIST Makro ────────────────────────────────────────────────────────
+    ("TCMB faiz kararı piyasa beklentileriyle örtüştü, BIST-100 yatay kapandı", "BIST", 0),
+    ("Türkiye enflasyonu beklentilerin altında geldi, piyasalarda iyimserlik güçlendi", "BIST", 1),
+    ("BIST-100 endeksi yabancı yatırımcı alımlarıyla yeni rekor tazeledi", "BIST", 1),
+    ("Türkiye cari açığı daralıyor, ekonomistler olumlu değerlendiriyor", "BIST", 1),
+    ("Jeopolitik riskler BIST üzerinde kısa vadeli satış baskısı oluşturdu", "BIST", -1),
+    ("Türk lirası dolar karşısında değer kaybı yaşadı", "BIST", -1),
+    ("Türkiye büyüme verileri beklentilerin altında kaldı, piyasalar düştü", "BIST", -1),
+    ("SPK yeni düzenleme taslağını kamuoyuyla paylaştı, görüşe açıldı", "BIST", 0),
+    ("BIST yabancı yatırımcı kayıt sayısında yeni rekor açıklandı", "BIST", 1),
+    ("Türkiye hazine ihalesi güçlü talep gördü, faiz beklentilerin altında kaldı", "BIST", 1),
+]
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def _parse_pubdate(raw: str) -> pd.Timestamp:
+    """Convert an RSS pubDate / Atom updated string to a tz-naive Timestamp."""
+    try:
+        ts = pd.to_datetime(raw)
+        if ts.tzinfo is not None:
+            ts = ts.replace(tzinfo=None)
+        return ts
+    except Exception:
+        return pd.Timestamp.now()
+
+
+def _parse_rss_feed(
+    url: str,
+    ticker: str,
+    source_label: str,
+    keywords: list[str],
+) -> pd.DataFrame:
+    """
+    Generic RSS/Atom feed fetcher and keyword filter.
+
+    Fetches `url`, keeps items whose title contains at least one keyword from
+    `keywords` (case-insensitive), and returns a normalised DataFrame with
+    columns: date, headline, ticker, source.
+
+    Passing an empty `keywords` list returns all items unfiltered.
+    """
+    resp = requests.get(url, timeout=15, headers=_RSS_HEADERS)
+    resp.raise_for_status()
+
+    root = ET.fromstring(resp.content)
+
+    # Support both RSS 2.0 (<channel><item>) and Atom (<feed><entry>) formats
+    ns_atom = "http://www.w3.org/2005/Atom"
+    channel = root.find("channel") or root
+    items = channel.findall("item") or root.findall(f".//{{{ns_atom}}}entry")
+
+    rows = []
+    for item in items:
+        title = (
+            item.findtext("title")
+            or item.findtext(f"{{{ns_atom}}}title")
+            or ""
+        ).strip()
+        pub = (
+            item.findtext("pubDate")
+            or item.findtext(f"{{{ns_atom}}}updated")
+            or item.findtext(f"{{{ns_atom}}}published")
+            or ""
+        ).strip()
+
+        if not title:
+            continue
+        if keywords and not any(kw in title.lower() for kw in keywords):
+            continue
+
+        rows.append({
+            "date":     _parse_pubdate(pub),
+            "headline": title,
+            "ticker":   ticker,
+            "source":   source_label,
+        })
+
+    return pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
+
+
+# ── US news adapters ──────────────────────────────────────────────────────────
 
 def _build_sample_dataset(ticker: str, days: int = 180) -> pd.DataFrame:
-    """
-    Generate a realistic demo dataset from the sample headline pool.
-    Headlines are randomly sampled and distributed across business days.
-    """
+    """Generate a demo dataset from the US sample headline pool."""
     np.random.seed(42)
     end   = datetime.date.today()
     start = end - datetime.timedelta(days=days)
     dates = pd.date_range(start, end, freq="B")
 
-    # prefer ticker-specific + SPY headlines
     pool = [h for h in _HEADLINES if h[1] in (ticker, "SPY")] or _HEADLINES
 
     rows = []
@@ -159,7 +358,7 @@ def _build_sample_dataset(ticker: str, days: int = 180) -> pd.DataFrame:
         n = np.random.randint(1, 5)
         idxs = np.random.choice(len(pool), size=n, replace=True)
         for i in idxs:
-            headline, sym, _ = pool[i]
+            headline, _, _ = pool[i]
             rows.append({
                 "date":     pd.Timestamp(date),
                 "headline": headline,
@@ -216,24 +415,144 @@ def _fetch_yfinance(ticker: str) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
 
 
+# ── BIST news adapters ────────────────────────────────────────────────────────
+
+def _fetch_kap_rss(ticker: str) -> pd.DataFrame:
+    """
+    KAP (Kamuyu Aydınlatma Platformu) — Turkey's public company disclosure platform.
+    RSS feed contains regulatory filings and company announcements.
+    Filters items by ticker-specific company keywords.
+    """
+    keywords = _BIST_KEYWORDS.get(ticker.upper(), [ticker.lower()])
+    return _parse_rss_feed(
+        "https://www.kap.org.tr/tr/rss",
+        ticker,
+        "KAP",
+        keywords,
+    )
+
+
+def _fetch_bigpara(ticker: str) -> pd.DataFrame:
+    """
+    Bigpara (Hurriyet) — Turkish financial and economic news RSS feed.
+    Filters items by ticker-specific company keywords.
+    """
+    keywords = _BIST_KEYWORDS.get(ticker.upper(), [ticker.lower()])
+    return _parse_rss_feed(
+        "https://bigpara.hurriyet.com.tr/rss/",
+        ticker,
+        "Bigpara",
+        keywords,
+    )
+
+
+def _fetch_investing_tr(ticker: str) -> pd.DataFrame:
+    """
+    Investing.com Turkey — Turkish market and company news RSS feed.
+    Uses the Turkey-specific news category feed.
+    Filters items by ticker-specific company keywords.
+    """
+    keywords = _BIST_KEYWORDS.get(ticker.upper(), [ticker.lower()])
+    return _parse_rss_feed(
+        "https://tr.investing.com/rss/news_285.rss",
+        ticker,
+        "Investing.com TR",
+        keywords,
+    )
+
+
+def _build_bist_sample_dataset(ticker: str, days: int = 180) -> pd.DataFrame:
+    """Generate a demo dataset from the BIST Turkish-language sample headline pool."""
+    np.random.seed(42)
+    end   = datetime.date.today()
+    start = end - datetime.timedelta(days=days)
+    dates = pd.date_range(start, end, freq="B")
+
+    pool = [h for h in _BIST_HEADLINES if h[1] in (ticker, "BIST")]
+    if not pool:
+        pool = _BIST_HEADLINES
+
+    rows = []
+    for date in dates:
+        n = np.random.randint(1, 4)
+        idxs = np.random.choice(len(pool), size=n, replace=True)
+        for i in idxs:
+            headline, _, _ = pool[i]
+            rows.append({
+                "date":     pd.Timestamp(date),
+                "headline": headline,
+                "ticker":   ticker,
+                "source":   "BIST Sample Dataset",
+            })
+
+    df = pd.DataFrame(rows).drop_duplicates(subset=["date", "headline"])
+    return df.sort_values("date").reset_index(drop=True)
+
+
+def _load_bist_news(ticker: str, days: int = 180, source: str = "auto") -> pd.DataFrame:
+    """
+    BIST news pipeline: KAP → Bigpara → Investing.com TR → BIST sample fallback.
+    Each live source is tried in order; the first non-empty result is returned.
+    On any network failure the next source is attempted transparently.
+    """
+    if source in ("kap", "auto"):
+        try:
+            df = _fetch_kap_rss(ticker)
+            if not df.empty:
+                print(f"  BIST news source: KAP ({len(df)} headlines)")
+                return df
+        except Exception as e:
+            print(f"  KAP RSS failed: {e}")
+
+    if source in ("bigpara", "auto"):
+        try:
+            df = _fetch_bigpara(ticker)
+            if not df.empty:
+                print(f"  BIST news source: Bigpara ({len(df)} headlines)")
+                return df
+        except Exception as e:
+            print(f"  Bigpara failed: {e}")
+
+    if source in ("investing_tr", "auto"):
+        try:
+            df = _fetch_investing_tr(ticker)
+            if not df.empty:
+                print(f"  BIST news source: Investing.com TR ({len(df)} headlines)")
+                return df
+        except Exception as e:
+            print(f"  Investing.com TR failed: {e}")
+
+    print("  BIST news source: built-in BIST sample dataset")
+    return _build_bist_sample_dataset(ticker, days=days)
+
+
+# ── public API ────────────────────────────────────────────────────────────────
+
 def load_news(
     ticker: str,
     days: int = 180,
     source: str = "auto",
+    market: str = "US",
 ) -> pd.DataFrame:
     """
     Fetch news headlines for a ticker.
 
     Parameters
     ----------
-    ticker : str   e.g. 'AAPL'
-    days   : int   lookback window for sample/yfinance data
-    source : str   'auto' | 'alphavantage' | 'yfinance' | 'sample'
+    ticker : str    e.g. 'AAPL' or 'THYAO'
+    days   : int    lookback window used by sample/yfinance adapters
+    source : str    US:   'auto' | 'alphavantage' | 'yfinance' | 'sample'
+                    BIST: 'auto' | 'kap' | 'bigpara' | 'investing_tr' | 'sample'
+    market : str    'US' | 'BIST'  — controls which adapter pipeline is used
 
     Returns
     -------
     DataFrame with columns: date, headline, ticker, source
     """
+    if market == "BIST":
+        return _load_bist_news(ticker, days=days, source=source)
+
+    # ── US pipeline ──────────────────────────────────────────────────────
     if source in ("alphavantage", "auto") and AV_API_KEY:
         try:
             df = _fetch_alphavantage(ticker)
@@ -252,5 +571,5 @@ def load_news(
         except Exception as e:
             print(f"  yfinance news failed: {e}")
 
-    print("  News source: built-in sample dataset")
+    print("  News source: built-in US sample dataset")
     return _build_sample_dataset(ticker, days=days)
