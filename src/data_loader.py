@@ -462,13 +462,30 @@ def _fetch_investing_tr(ticker: str) -> pd.DataFrame:
 
 
 def _build_bist_sample_dataset(ticker: str, days: int = 180) -> pd.DataFrame:
-    """Generate a demo dataset from the BIST Turkish-language sample headline pool."""
+    """
+    Generate a demo dataset from the BIST Turkish-language sample headline pool.
+
+    Filtering rules (strictest first):
+      1. Use only headlines whose primary_ticker == ticker (exact company match).
+      2. If none found, fall back to all company-specific headlines
+         (h[1] != "BIST") — never injects macro/market-wide headlines.
+
+    Macro/market-wide headlines (primary_ticker == "BIST") are deliberately
+    excluded from ticker pages. Use get_bist_market_context() for those.
+    """
     np.random.seed(42)
     end   = datetime.date.today()
     start = end - datetime.timedelta(days=days)
     dates = pd.date_range(start, end, freq="B")
 
-    pool = [h for h in _BIST_HEADLINES if h[1] in (ticker, "BIST")]
+    # Rule 1 — exact ticker match only
+    pool = [h for h in _BIST_HEADLINES if h[1] == ticker]
+
+    # Rule 2 — fallback: all company headlines, macro excluded
+    if not pool:
+        pool = [h for h in _BIST_HEADLINES if h[1] != "BIST"]
+
+    # Ultimate safety net (should never be reached with current data)
     if not pool:
         pool = _BIST_HEADLINES
 
@@ -527,6 +544,46 @@ def _load_bist_news(ticker: str, days: int = 180, source: str = "auto") -> pd.Da
 
 
 # ── public API ────────────────────────────────────────────────────────────────
+
+def get_bist_market_context(days: int = 180) -> pd.DataFrame:
+    """
+    Return BIST-wide macro / market-context headlines from the sample pool.
+
+    These are intentionally separated from company-specific ticker data.
+    Use this to display a market overview panel alongside individual ticker
+    analysis — never mix into a single company's scored headlines.
+
+    Returns
+    -------
+    DataFrame with columns: date, headline, ticker ('BIST'), source
+    """
+    np.random.seed(0)
+    end   = datetime.date.today()
+    start = end - datetime.timedelta(days=days)
+    dates = pd.date_range(start, end, freq="B")
+
+    pool = [h for h in _BIST_HEADLINES if h[1] == "BIST"]
+    if not pool:
+        return pd.DataFrame(columns=["date", "headline", "ticker", "source"])
+
+    rows = []
+    for date in dates:
+        n = np.random.randint(0, 2)          # sparser than company feeds
+        if n == 0:
+            continue
+        idxs = np.random.choice(len(pool), size=n, replace=True)
+        for i in idxs:
+            headline, _, _ = pool[i]
+            rows.append({
+                "date":     pd.Timestamp(date),
+                "headline": headline,
+                "ticker":   "BIST",
+                "source":   "BIST Market Context",
+            })
+
+    df = pd.DataFrame(rows).drop_duplicates(subset=["date", "headline"])
+    return df.sort_values("date").reset_index(drop=True)
+
 
 def load_news(
     ticker: str,
