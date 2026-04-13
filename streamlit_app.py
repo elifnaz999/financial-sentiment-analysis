@@ -68,7 +68,8 @@ with st.sidebar:
     st.markdown("## ⚙️ Settings")
     st.markdown("---")
 
-    market = st.radio("Market", ["US", "BIST"], horizontal=True)
+    market = st.selectbox("Market", ["US", "BIST"], index=0)
+    st.markdown("---")
     _ticker_list = _US_TICKERS if market == "US" else _BIST_TICKERS
     ticker = st.selectbox("Ticker", _ticker_list, index=0)
 
