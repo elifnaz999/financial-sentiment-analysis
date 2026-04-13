@@ -58,16 +58,19 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+# ── ticker lists ─────────────────────────────────────────────────────────────
+_US_TICKERS   = ["AAPL", "MSFT", "TSLA", "GOOGL", "AMZN", "NVDA"]
+_BIST_TICKERS = ["THYAO", "ASELS", "GARAN", "AKBNK", "KCHOL",
+                 "SISE", "EREGL", "TUPRS", "BIMAS", "ISCTR"]
+
 # ── sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ⚙️ Settings")
     st.markdown("---")
 
-    ticker = st.selectbox(
-        "Ticker",
-        ["AAPL", "MSFT", "TSLA", "GOOGL", "AMZN", "NVDA"],
-        index=0,
-    )
+    market = st.radio("Market", ["US", "BIST"], horizontal=True)
+    _ticker_list = _US_TICKERS if market == "US" else _BIST_TICKERS
+    ticker = st.selectbox("Ticker", _ticker_list, index=0)
 
     date_col1, date_col2 = st.columns(2)
     default_start = datetime.date.today() - datetime.timedelta(days=180)
@@ -147,7 +150,7 @@ def get_prices(ticker: str, start: str, end: str) -> pd.DataFrame:
 
 # ── session state initialisation ──────────────────────────────────────────────
 for key in ("df_scored", "df_prices", "df_daily", "df_weekly",
-            "df_merged", "corr_stats", "active_ticker"):
+            "df_merged", "corr_stats", "active_ticker", "active_market"):
     if key not in st.session_state:
         st.session_state[key] = None
 
@@ -166,9 +169,12 @@ if run_btn:
             st.error(f"Sentiment scoring failed: {e}")
             st.stop()
 
+    # BIST tickers require the ".IS" suffix on Yahoo Finance
+    yf_ticker = f"{ticker}.IS" if market == "BIST" else ticker
+
     with st.spinner("Fetching stock prices …"):
         try:
-            df_prices = get_prices(ticker, start_str, end_str)
+            df_prices = get_prices(yf_ticker, start_str, end_str)
         except Exception as e:
             st.warning(f"Price data unavailable: {e}")
             df_prices = pd.DataFrame()
@@ -189,6 +195,7 @@ if run_btn:
     st.session_state.df_merged    = df_merged
     st.session_state.corr_stats   = corr_stats
     st.session_state.active_ticker = ticker
+    st.session_state.active_market = market
     st.success(f"✅ Scored **{len(df_scored)}** headlines for **{ticker}**")
 
 
@@ -214,6 +221,7 @@ df_weekly      = st.session_state.df_weekly
 df_merged      = st.session_state.df_merged
 corr_stats     = st.session_state.corr_stats
 current_ticker = st.session_state.active_ticker
+current_market = st.session_state.active_market or "US"
 
 n_total = len(df_scored)
 n_pos   = (df_scored["sentiment_label"] == "positive").sum()
@@ -314,9 +322,10 @@ with tab3:
         st.warning("No price data available. Check your internet connection.")
     else:
         summary = price_summary(df_prices)
+        _currency = "₺" if current_market == "BIST" else "$"
         m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("Start Price",     f"${summary['start_price']}")
-        m2.metric("End Price",       f"${summary['end_price']}")
+        m1.metric("Start Price",     f"{_currency}{summary['start_price']}")
+        m2.metric("End Price",       f"{_currency}{summary['end_price']}")
         m3.metric("Total Return",    f"{summary['total_return']:+.2f}%")
         m4.metric("Ann. Volatility", f"{summary['ann_volatility']:.2f}%")
         m5.metric("Max Drawdown",    f"{summary['max_drawdown']:.2f}%")
@@ -331,7 +340,7 @@ with tab3:
         ))
         fig_candle.update_layout(
             title=f"{current_ticker} Price (OHLC)",
-            xaxis_title="Date", yaxis_title="Price ($)",
+            xaxis_title="Date", yaxis_title=f"Price ({_currency})",
             template=CHART_THEME, height=420,
             xaxis_rangeslider_visible=False,
         )
