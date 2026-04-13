@@ -101,7 +101,10 @@ with st.sidebar:
     )
 
     run_btn = st.button("🔍 Analyze Sentiment", use_container_width=True, type="primary")
-    st.caption("⚡ First run downloads FinBERT (~440 MB). Subsequent runs use cache.")
+    if market == "BIST":
+        st.caption("⚡ First run downloads Turkish model (~500 MB). Subsequent runs use cache.")
+    else:
+        st.caption("⚡ First run downloads FinBERT (~440 MB). Subsequent runs use cache.")
 
     st.markdown("---")
     st.markdown("**Model:** [ProsusAI/finbert](https://huggingface.co/ProsusAI/finbert)")
@@ -122,9 +125,16 @@ st.markdown(
 # ── cached model load ─────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner="Loading FinBERT model …")
 def load_finbert_cached():
-    """Load once per app session; persists across reruns."""
+    """Load FinBERT once per app session; persists across reruns."""
     from src.sentiment_model import load_finbert
     load_finbert()
+
+
+@st.cache_resource(show_spinner="Loading Turkish sentiment model …")
+def load_turkish_model_cached():
+    """Load savasy/bert-base-turkish-sentiment-cased once per app session."""
+    from src.sentiment_model import load_turkish_model
+    load_turkish_model()
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -141,7 +151,7 @@ def get_scored_data(ticker: str, source: str, start: str, end: str, bs: int,
 
     days = (pd.Timestamp(end) - pd.Timestamp(start)).days + 30
     news   = load_news(ticker, days=days, source=source, market=market)
-    scored = score_dataframe(news, batch_size=bs)
+    scored = score_dataframe(news, batch_size=bs, market=market)
     try:
         save_scored(scored, ticker)
     except Exception:
@@ -169,9 +179,17 @@ if run_btn:
     start_str = start_date.isoformat()
     end_str   = end_date.isoformat()
 
-    load_finbert_cached()
+    if market == "BIST":
+        load_turkish_model_cached()
+    else:
+        load_finbert_cached()
 
-    with st.spinner("Scoring headlines with FinBERT …"):
+    _score_spinner = (
+        "Scoring headlines with Turkish sentiment model …"
+        if market == "BIST"
+        else "Scoring headlines with FinBERT …"
+    )
+    with st.spinner(_score_spinner):
         try:
             df_scored = get_scored_data(ticker, news_source, start_str, end_str, batch_size, market)
         except Exception as e:
@@ -208,9 +226,10 @@ if run_btn:
     st.success(f"✅ Scored **{len(df_scored)}** headlines for **{ticker}**")
     if market == "BIST":
         st.info(
-            "ℹ️ **BIST mode:** Headlines are sourced from Turkish news feeds. "
-            "FinBERT is trained on English financial text — sentiment scores for "
-            "Turkish headlines are approximate. Turkish model support is planned for Phase 3."
+            "ℹ️ **BIST mode:** Headlines scored with "
+            "[savasy/bert-base-turkish-sentiment-cased](https://huggingface.co/savasy/bert-base-turkish-sentiment-cased) "
+            "— a Turkish BERT model. Trained on general Turkish text; financial domain "
+            "accuracy improves with a finance-specific fine-tune (future work)."
         )
 
 
@@ -479,11 +498,16 @@ with stock price movements.
 
 ---
 
-#### Model — ProsusAI/FinBERT
+#### Models
 
-FinBERT is a BERT-base model fine-tuned on ~10 000 financial news articles, earnings
-call transcripts, and analyst reports. It is more accurate on financial language than
-general-purpose sentiment models.
+| Market | Model | Base | Training domain |
+|--------|-------|------|-----------------|
+| US     | [ProsusAI/finbert](https://huggingface.co/ProsusAI/finbert) | BERT-base | ~10 000 financial texts |
+| BIST   | [savasy/bert-base-turkish-sentiment-cased](https://huggingface.co/savasy/bert-base-turkish-sentiment-cased) | dbmdz/bert-base-turkish-cased | Turkish sentiment datasets |
+
+Both models share the same output schema. Label names emitted by the Turkish model
+(`notr`, `positive`, `negative`) are normalised to the standard three-class schema at
+inference time.
 
 | Label    | Meaning                              |
 |----------|--------------------------------------|
